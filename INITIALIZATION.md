@@ -1,6 +1,6 @@
 # 在应用中初始化 CacheHub
 
-库的通用入口是 `NewHubWithConfig(HubConfig)`。调用方负责创建 Redis client、日志和其他依赖；业务 Cache 通过 DriverName 选择层级，不关心基础设施如何初始化。
+库的通用入口是 `NewHubWithConfig(HubConfig)`。调用方负责创建 Redis client、日志和其他依赖；业务 Cache 通过 DriverType 选择层级，不关心基础设施如何初始化。
 
 ## 普通 Go 项目
 
@@ -12,16 +12,16 @@ func NewCacheHub(client redis.UniversalClient, logger cachehub.Logger) (*cachehu
         Prefix: "myapp:go:",
         Lock: locker.NewRedis(client),
         Logger: logger,
-        Drivers: map[string]cachehub.Driver{
-            "memory": driver.NewMemory(10000),
-            "redis": driver.NewRedis(client),
+        Drivers: []cachehub.Driver{
+            driver.NewMemory(10000),
+            driver.NewRedis(client),
         },
         // 不指定时默认使用内置 json；可注册并选用其他格式。
     })
 }
 ```
 
-这个工厂属于应用，可以读取应用自己的配置，也可以改为接收多个 Redis client，注册不同名称。缓存库不读取 Viper 或环境变量，不创建、关闭传入的连接。
+这个工厂属于应用，可以读取应用自己的配置，也可以改为接收多个 Redis client，按不同具体驱动类型注册。缓存库不读取 Viper 或环境变量，不创建、关闭传入的连接。
 
 ## 使用 xdi 的项目
 
@@ -60,20 +60,29 @@ func CacheHub() (h *cachehub.Hub) {
 
 `GoRedis()` 由应用提供。工厂中的 driver、locker、redis 类型对应本模块的子包和 go-redis；具体数据库、前缀、日志、生命周期均由项目管理。
 
+业务定义集中配置 Key、空值策略、版本和锁；构造时自动读取：
+
+```go
+func (*UserCache) GetConfig() cachehub.Config {
+    cfg := cachehub.DefaultConfig("user")
+    cfg.CacheNull = true
+    return cfg
+}
+```
+
 业务调用时：
 
 ```go
-cfg := cachehub.DefaultConfig("user")
 cache, err := cachehub.GetCache[int, *User](di.CacheHub(), func() *UserCache {
     return &UserCache{}
-}, cfg)
+})
 
 // 需要新业务缓存对象并替换已保存实例时传入 true。
 fresh, err := cachehub.GetCache[int, *User](di.CacheHub(), func() *UserCache {
     return &UserCache{}
-}, cfg, true)
+}, true)
 ```
 
-`UserCache.GetLevels()` 只配置 `DriverName`、TTL 和可选 `SerializerName`，不需要逐个注入 Memory 或 Redis。若业务需要数据库，仍由业务自己的构造函数注入。
+`UserCache.GetLevels()` 只配置 `DriverType`、TTL 和可选 `SerializerName`，不需要逐个注入 Memory 或 Redis。若业务需要数据库，仍由业务自己的构造函数注入。
 
 Go 泛型通过 `cachehub.GetCache` 保留业务参数与返回值类型。Hub 按具体业务类型缓存对象，构造使用应用传入的工厂；不通过类名字符串反射调用构造函数。命中实例表时不会调用工厂，也不会覆盖原配置。`cachehub.New` 仍可始终创建独立对象。

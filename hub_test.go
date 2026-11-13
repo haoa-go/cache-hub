@@ -9,15 +9,15 @@ import (
 	"time"
 )
 
-func TestHubNamedDriversAndSerializers(t *testing.T) {
+func TestHubTypedDriversAndSerializers(t *testing.T) {
 	f := newFixture(t)
 	f.def.levels = []hub.Level{
-		{DriverName: "memory", TTL: time.Minute},
-		{DriverName: "redis", TTL: time.Minute, SerializerName: "remote"},
+		{Name: "memory", DriverType: hub.TypeOfDriver[*driver.Memory](), TTL: time.Minute},
+		{Name: "redis", DriverType: hub.TypeOfDriver[*sharedDriver](), TTL: time.Minute, SerializerName: "remote"},
 	}
 	h, err := hub.NewHubWithConfig(hub.HubConfig{
 		Prefix: "registered:", Lock: f.lock,
-		Drivers: map[string]hub.Driver{"memory": f.local, "redis": f.shared},
+		Drivers: []hub.Driver{f.local, f.shared},
 		Serializers: map[string]hub.Serializer{
 			"local":  prefixedSerializer{prefix: "LOCAL:"},
 			"remote": prefixedSerializer{prefix: "REMOTE:"},
@@ -26,7 +26,7 @@ func TestHubNamedDriversAndSerializers(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cache, err := hub.New[int, *user](h, f.def, hub.DefaultConfig("user"))
+	cache, err := hub.New[int, *user](h, configured(f.def, hub.DefaultConfig("user")))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -59,22 +59,22 @@ func TestHubNamedDriversAndSerializers(t *testing.T) {
 	}
 }
 
-func TestHubSnapshotsRegistrationMapsAndSharesInstances(t *testing.T) {
+func TestHubSnapshotsRegistrationsAndSharesInstances(t *testing.T) {
 	f := newFixture(t)
-	registrations := map[string]hub.Driver{"memory": f.local}
+	registrations := []hub.Driver{f.local}
 	formats := map[string]hub.Serializer{"custom": prefixedSerializer{prefix: "ORIGINAL:"}}
 	h, err := hub.NewHubWithConfig(hub.HubConfig{Drivers: registrations, Serializers: formats, DefaultSerializer: "custom"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	registrations["memory"] = driver.NewMemory(1)
+	registrations[0] = driver.NewMemory(1)
 	delete(formats, "custom")
-	f.def.levels = []hub.Level{{DriverName: "memory"}}
-	a, err := hub.New[int, *user](h, f.def, hub.DefaultConfig("user"))
+	f.def.levels = []hub.Level{{Name: "memory", DriverType: hub.TypeOfDriver[*driver.Memory]()}}
+	a, err := hub.New[int, *user](h, configured(f.def, hub.DefaultConfig("user")))
 	if err != nil {
 		t.Fatal(err)
 	}
-	b, err := hub.New[int, *user](h, f.def, hub.DefaultConfig("user"))
+	b, err := hub.New[int, *user](h, configured(f.def, hub.DefaultConfig("user")))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -91,8 +91,8 @@ func TestHubSnapshotsRegistrationMapsAndSharesInstances(t *testing.T) {
 func TestHubConfigurationErrors(t *testing.T) {
 	var nilDriver *driver.Memory
 	for _, cfg := range []hub.HubConfig{
-		{Drivers: map[string]hub.Driver{"": driver.NewMemory(1)}},
-		{Drivers: map[string]hub.Driver{"memory": nilDriver}},
+		{Drivers: []hub.Driver{driver.NewMemory(1), driver.NewMemory(1)}},
+		{Drivers: []hub.Driver{nilDriver}},
 		{Serializers: map[string]hub.Serializer{"missing": nil}},
 		{DefaultSerializer: "missing"},
 	} {
@@ -100,20 +100,55 @@ func TestHubConfigurationErrors(t *testing.T) {
 			t.Fatal("错误的注册配置应返回错误")
 		}
 	}
-	h, err := hub.NewHubWithConfig(hub.HubConfig{Drivers: map[string]hub.Driver{"memory": driver.NewMemory(1)}})
+	h, err := hub.NewHubWithConfig(hub.HubConfig{Drivers: []hub.Driver{driver.NewMemory(1)}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	f := newFixture(t)
 	for _, level := range []hub.Level{
-		{DriverName: "missing"},
-		{DriverName: "memory", SerializerName: "missing"},
-		{DriverName: "memory", Driver: driver.NewMemory(1)},
-		{DriverName: "memory", SerializerName: "json", Serializer: prefixedSerializer{}},
+		{},
+		{DriverType: hub.TypeOfDriver[hub.Driver]()},
+		{Name: "redis", DriverType: hub.TypeOfDriver[*driver.Redis]()},
+		{Name: "memory", DriverType: hub.TypeOfDriver[*driver.Memory](), SerializerName: "missing"},
+		{Name: "memory", DriverType: hub.TypeOfDriver[*driver.Memory](), Driver: driver.NewMemory(1)},
+		{Name: "memory", DriverType: hub.TypeOfDriver[*driver.Memory](), SerializerName: "json", Serializer: prefixedSerializer{}},
 	} {
 		f.def.levels = []hub.Level{level}
-		if _, err := hub.New[int, *user](h, f.def, hub.DefaultConfig("user")); err == nil {
+		if _, err := hub.New[int, *user](h, configured(f.def, hub.DefaultConfig("user"))); err == nil {
 			t.Fatal("错误的层级引用应返回错误", level)
 		}
+	}
+}
+
+func TestTypedDriverReferenceIsScopedToHub(t *testing.T) {
+	firstDriver, secondDriver := driver.NewMemory(10), driver.NewMemory(10)
+	first, err := hub.NewHubWithConfig(hub.HubConfig{Drivers: []hub.Driver{firstDriver}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := hub.NewHubWithConfig(hub.HubConfig{Drivers: []hub.Driver{secondDriver}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := newFixture(t)
+	f.def.levels = []hub.Level{{DriverType: hub.TypeOfDriver[*driver.Memory]()}}
+	cfg := hub.DefaultConfig("isolated")
+	a, err := hub.New[int, *user](first, configured(f.def, cfg))
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := hub.New[int, *user](second, configured(f.def, cfg))
+	if err != nil {
+		t.Fatal(err)
+	}
+	get(t, a, 1)
+	if _, found, err := secondDriver.Get(context.Background(), "isolated:1"); err != nil || found {
+		t.Fatal("不同 Hub 的同类型驱动不应共享数据", found, err)
+	}
+	if r := get(t, b, 1); r.Source != "build" {
+		t.Fatal("第二个 Hub 应独立回源", r)
+	}
+	if r := get(t, a, 1); r.Source != "*driver.Memory" {
+		t.Fatal("未指定来源名时应使用具体类型名", r)
 	}
 }

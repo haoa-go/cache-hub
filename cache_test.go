@@ -22,6 +22,7 @@ type user struct {
 	Name string `json:"name"`
 }
 type definition struct {
+	config hub.Config
 	levels []hub.Level
 	build  func(context.Context, int) (*user, error)
 	multi  func(context.Context, []int) (map[int]*user, error)
@@ -76,14 +77,25 @@ type countedLock struct {
 	releases atomic.Int32
 }
 
-func (l *countedLock) TryLock(ctx context.Context, k string, ttl time.Duration) (bool, error) {
+func (l *countedLock) TryLock(ctx context.Context, k string, ttl time.Duration) (hub.LockHandle, error) {
 	l.attempts.Add(1)
-	return l.inner.TryLock(ctx, k, ttl)
+	handle, err := l.inner.TryLock(ctx, k, ttl)
+	if err != nil || handle == nil {
+		return nil, err
+	}
+	return &countedHandle{handle: handle, owner: l}, nil
 }
-func (l *countedLock) Unlock(ctx context.Context, k string) (bool, error) {
-	l.releases.Add(1)
-	return l.inner.Unlock(ctx, k)
+
+type countedHandle struct {
+	handle hub.LockHandle
+	owner  *countedLock
 }
+
+func (h *countedHandle) Unlock(ctx context.Context) (bool, error) {
+	h.owner.releases.Add(1)
+	return h.handle.Unlock(ctx)
+}
+
 func (l *countedLock) IsLocked(ctx context.Context, k string) (bool, error) {
 	return l.inner.IsLocked(ctx, k)
 }
@@ -114,7 +126,7 @@ func newFixture(t *testing.T) *fixture {
 		}
 		return result, nil
 	}
-	c, err := hub.New[int, *user](hub.NewHub(f.lock, "test:", nil), f.def, hub.DefaultConfig("user"))
+	c, err := hub.New[int, *user](hub.NewHub(f.lock, "test:", nil), configured(f.def, hub.DefaultConfig("user")))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -209,7 +221,7 @@ func TestVersionWrapAndIndependentConfig(t *testing.T) {
 	if !strings.Contains(string(b), `"cachehub_version":2`) {
 		t.Fatal(string(b))
 	}
-	other, err := hub.New[int, *user](hub.NewHub(f.lock, "test:", nil), f.def, hub.DefaultConfig("user"))
+	other, err := hub.New[int, *user](hub.NewHub(f.lock, "test:", nil), configured(f.def, hub.DefaultConfig("user")))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -283,7 +295,7 @@ func TestWriteFalseVersusError(t *testing.T) {
 				d.setError = errors.New("写入执行错误")
 			}
 			f.def.levels = []hub.Level{{Name: "failed", Driver: d}}
-			c, e := hub.New[int, *user](hub.NewHub(nil, "test:", log), f.def, hub.DefaultConfig("user"))
+			c, e := hub.New[int, *user](hub.NewHub(nil, "test:", log), configured(f.def, hub.DefaultConfig("user")))
 			if e != nil {
 				t.Fatal(e)
 			}
@@ -442,7 +454,7 @@ func TestPerLevelSerializerAndPrefix(t *testing.T) {
 	f := newFixture(t)
 	f.def.levels[0].Serializer = prefixedSerializer{prefix: "L1:"}
 	f.def.levels[1].Serializer = prefixedSerializer{prefix: "L2:"}
-	c, e := hub.New[int, *user](hub.NewHub(nil, "custom:", nil), f.def, hub.DefaultConfig("user"))
+	c, e := hub.New[int, *user](hub.NewHub(f.lock, "custom:", nil), configured(f.def, hub.DefaultConfig("user")))
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -461,9 +473,10 @@ func TestPerLevelSerializerAndPrefix(t *testing.T) {
 }
 
 type scalarDefinition struct {
-	level hub.Level
-	value any
-	count int
+	config hub.Config
+	level  hub.Level
+	value  any
+	count  int
 }
 
 func (d *scalarDefinition) GetLevels() []hub.Level { return []hub.Level{d.level} }
@@ -475,7 +488,7 @@ func TestPHPEmptySemantics(t *testing.T) {
 	for _, value := range []any{false, "", nil, 0, []any{}, map[string]any{}} {
 		t.Run(fmt.Sprintf("%T_%v", value, value), func(t *testing.T) {
 			d := &scalarDefinition{level: hub.Level{Driver: driver.NewMemory(10)}, value: value}
-			c, e := hub.New[string, any](hub.NewHub(nil, "", nil), d, hub.DefaultConfig("scalar"))
+			c, e := hub.New[string, any](hub.NewHub(nil, "", nil), configured(d, hub.DefaultConfig("scalar")))
 			if e != nil {
 				t.Fatal(e)
 			}
@@ -519,7 +532,25 @@ func TestLargeIntegerRoundTrip(t *testing.T) {
 }
 func TestDefaultConfiguration(t *testing.T) {
 	cfg := hub.DefaultConfig("user")
-	if cfg.LockEnabled || cfg.LockTimeoutMode != hub.LockTimeoutBuild || cfg.LockRetryCount != 3 || cfg.LockRetryInterval != 100*time.Millisecond || !cfg.CacheNull || cfg.Versioned || cfg.Version != 1 || cfg.NullValue != "" {
+	if !cfg.LockEnabled || cfg.LockTimeoutMode != hub.LockTimeoutBuild || cfg.LockRetryCount != 3 || cfg.LockRetryInterval != 100*time.Millisecond || !cfg.CacheNull || cfg.Versioned || cfg.Version != 1 || cfg.NullValue != "" {
 		t.Fatal(cfg)
 	}
+}
+
+func (d *definition) GetConfig() hub.Config        { return d.config }
+func (d *definition) setConfig(c hub.Config)       { d.config = c }
+func (d *scalarDefinition) GetConfig() hub.Config  { return d.config }
+func (d *scalarDefinition) setConfig(c hub.Config) { d.config = c }
+
+// 测试工厂把每个场景的配置写入业务定义，生产构造入口不再接收配置。
+func configured[D any](d D, cfg hub.Config) D {
+	value := reflect.ValueOf(d)
+	if !value.IsValid() || (value.Kind() == reflect.Pointer && value.IsNil()) {
+		return d
+	}
+	any(d).(interface{ setConfig(hub.Config) }).setConfig(cfg)
+	return d
+}
+func configuredFactory[D any](factory func() D, cfg hub.Config) func() D {
+	return func() D { return configured(factory(), cfg) }
 }

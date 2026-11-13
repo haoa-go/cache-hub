@@ -9,7 +9,10 @@ import (
 
 type JSON struct{}
 
+// value 为待序列化的数据。
 func (JSON) Encode(value any) ([]byte, error) { return json.Marshal(value) }
+
+// data 为序列化字节数据，target 为接收解码结果的指针。
 func (JSON) Decode(data []byte, target any) error {
 	if !json.Valid(data) {
 		return fmt.Errorf("无效的 JSON 缓存数据")

@@ -14,17 +14,17 @@ type anotherDefinition struct{ *definition }
 
 func TestGetCacheReuseAndFreshReplacement(t *testing.T) {
 	f := newFixture(t)
-	h := hub.NewHub(nil, "test:", nil)
+	h := hub.NewHub(f.lock, "test:", nil)
 	var calls int
 	factory := func() *definition { calls++; d := *f.def; return &d }
 	config := hub.DefaultConfig("user")
-	first, err := hub.GetCache[int, *user](h, factory, config)
+	first, err := hub.GetCache[int, *user](h, configuredFactory(factory, config))
 	if err != nil {
 		t.Fatal(err)
 	}
 	// 已存在时不调用工厂，不用新配置覆盖原配置，也不重新验证其层级。
 	different := hub.DefaultConfig("ignored")
-	reused, err := hub.GetCache[int, *user](h, factory, different, false)
+	reused, err := hub.GetCache[int, *user](h, configuredFactory(factory, different), false)
 	if err != nil || reused != first || calls != 1 || reused.Config.Key != "user" {
 		t.Fatal(reused, err, calls)
 	}
@@ -32,11 +32,11 @@ func TestGetCacheReuseAndFreshReplacement(t *testing.T) {
 	if reused.Config.LockRetryCount != 8 {
 		t.Fatal("复用的不是同一个对象")
 	}
-	fresh, err := hub.GetCache[int, *user](h, factory, config, true)
+	fresh, err := hub.GetCache[int, *user](h, configuredFactory(factory, config), true)
 	if err != nil || fresh == first || calls != 2 || fresh.Config.LockRetryCount != 3 {
 		t.Fatal(fresh, err, calls)
 	}
-	after, err := hub.GetCache[int, *user](h, factory, config)
+	after, err := hub.GetCache[int, *user](h, configuredFactory(factory, config))
 	if err != nil || after != fresh || calls != 2 {
 		t.Fatal(after, err, calls)
 	}
@@ -54,24 +54,24 @@ func TestGetCacheSeparatesTypesAndHubs(t *testing.T) {
 	h := hub.NewHub(nil, "", nil)
 	cfg := hub.DefaultConfig("same-key")
 	factory := func() *definition { d := *f.def; return &d }
-	first, err := hub.GetCache[int, *user](h, factory, cfg)
+	first, err := hub.GetCache[int, *user](h, configuredFactory(factory, cfg))
 	if err != nil {
 		t.Fatal(err)
 	}
-	other, err := hub.GetCache[int, *user](h, func() *anotherDefinition { return &anotherDefinition{factory()} }, cfg)
+	other, err := hub.GetCache[int, *user](h, configuredFactory(func() *anotherDefinition { return &anotherDefinition{factory()} }, cfg))
 	if err != nil || other == first {
 		t.Fatal(other, err)
 	}
-	secondHub, err := hub.GetCache[int, *user](hub.NewHub(nil, "", nil), factory, cfg)
+	secondHub, err := hub.GetCache[int, *user](hub.NewHub(nil, "", nil), configuredFactory(factory, cfg))
 	if err != nil || secondHub == first {
 		t.Fatal(secondHub, err)
 	}
 	// New 保留不经过实例表的原有语义。
-	independent, err := hub.New[int, *user](h, factory(), cfg)
+	independent, err := hub.New[int, *user](h, configured(factory(), cfg))
 	if err != nil || independent == first {
 		t.Fatal(independent, err)
 	}
-	again, err := hub.GetCache[int, *user](h, factory, cfg)
+	again, err := hub.GetCache[int, *user](h, configuredFactory(factory, cfg))
 	if err != nil || again != first {
 		t.Fatal(again, err)
 	}
@@ -82,27 +82,27 @@ func TestGetCacheFailedConstructionDoesNotReplace(t *testing.T) {
 	h := hub.NewHub(nil, "", nil)
 	cfg := hub.DefaultConfig("user")
 	factory := func() *definition { d := *f.def; return &d }
-	first, err := hub.GetCache[int, *user](h, factory, cfg)
+	first, err := hub.GetCache[int, *user](h, configuredFactory(factory, cfg))
 	if err != nil {
 		t.Fatal(err)
 	}
 	bad := hub.DefaultConfig("")
-	if _, err := hub.GetCache[int, *user](h, factory, bad, true); err == nil {
+	if _, err := hub.GetCache[int, *user](h, configuredFactory(factory, bad), true); err == nil {
 		t.Fatal("错误配置应失败")
 	}
-	if _, err := hub.GetCache[int, *user](h, func() *definition { return nil }, cfg, true); err == nil {
+	if _, err := hub.GetCache[int, *user](h, configuredFactory(func() *definition { return nil }, cfg), true); err == nil {
 		t.Fatal("空对象应失败")
 	}
-	reused, err := hub.GetCache[int, *user](h, factory, cfg)
+	reused, err := hub.GetCache[int, *user](h, configuredFactory(factory, cfg))
 	if err != nil || reused != first {
 		t.Fatal(reused, err)
 	}
 	// 首次失败也不能污染实例表。
 	clean := hub.NewHub(nil, "", nil)
-	if _, err := hub.GetCache[int, *user](clean, factory, bad); err == nil {
+	if _, err := hub.GetCache[int, *user](clean, configuredFactory(factory, bad)); err == nil {
 		t.Fatal("错误配置应失败")
 	}
-	valid, err := hub.GetCache[int, *user](clean, factory, cfg)
+	valid, err := hub.GetCache[int, *user](clean, configuredFactory(factory, cfg))
 	if err != nil || valid == nil {
 		t.Fatal(valid, err)
 	}
@@ -127,7 +127,11 @@ func TestGetCacheConcurrentConstructionDoesNotLockFactory(t *testing.T) {
 	results := make(chan *hub.Cache[int, *user], n)
 	errs := make(chan error, n)
 	for i := 0; i < n; i++ {
-		go func() { cache, err := hub.GetCache[int, *user](h, factory, cfg); results <- cache; errs <- err }()
+		go func() {
+			cache, err := hub.GetCache[int, *user](h, configuredFactory(factory, cfg))
+			results <- cache
+			errs <- err
+		}()
 	}
 	var first *hub.Cache[int, *user]
 	for i := 0; i < n; i++ {
@@ -153,7 +157,7 @@ func TestGetCacheConcurrentFreshReplacement(t *testing.T) {
 	h := hub.NewHub(nil, "", nil)
 	cfg := hub.DefaultConfig("user")
 	factory := func() *definition { d := *f.def; return &d }
-	first, err := hub.GetCache[int, *user](h, factory, cfg)
+	first, err := hub.GetCache[int, *user](h, configuredFactory(factory, cfg))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -164,20 +168,20 @@ func TestGetCacheConcurrentFreshReplacement(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			fresh, err := hub.GetCache[int, *user](h, factory, cfg, true)
+			fresh, err := hub.GetCache[int, *user](h, configuredFactory(factory, cfg), true)
 			if err != nil {
 				t.Error(err)
 				return
 			}
 			created <- fresh
-			if _, err = hub.GetCache[int, *user](h, factory, cfg); err != nil {
+			if _, err = hub.GetCache[int, *user](h, configuredFactory(factory, cfg)); err != nil {
 				t.Error(err)
 			}
 		}()
 	}
 	wg.Wait()
 	close(created)
-	last, err := hub.GetCache[int, *user](h, factory, cfg)
+	last, err := hub.GetCache[int, *user](h, configuredFactory(factory, cfg))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -202,16 +206,16 @@ func TestGetCacheInvalidArguments(t *testing.T) {
 	h := hub.NewHub(nil, "", nil)
 	cfg := hub.DefaultConfig("user")
 	factory := func() *definition { return f.def }
-	if _, err := hub.GetCache[int, *user](nil, factory, cfg); err == nil {
+	if _, err := hub.GetCache[int, *user](nil, configuredFactory(factory, cfg)); err == nil {
 		t.Fatal("空 Hub 应失败")
 	}
-	if _, err := hub.GetCache[int, *user, *definition](h, nil, cfg); err == nil {
+	if _, err := hub.GetCache[int, *user, *definition](h, nil); err == nil {
 		t.Fatal("空工厂应失败")
 	}
-	if _, err := hub.GetCache[int, *user](h, factory, cfg, true, false); err == nil {
+	if _, err := hub.GetCache[int, *user](h, configuredFactory(factory, cfg), true, false); err == nil {
 		t.Fatal("多余 fresh 参数应失败")
 	}
-	if _, err := hub.GetCache[int, *user](h, func() hub.Definition[int, *user] { return f.def }, cfg); err == nil || !strings.Contains(err.Error(), "具体类型") {
+	if _, err := hub.GetCache[int, *user](h, configuredFactory(func() hub.CacheDefinition[int, *user] { return f.def }, cfg)); err == nil || !strings.Contains(err.Error(), "具体类型") {
 		t.Fatal(err)
 	}
 }

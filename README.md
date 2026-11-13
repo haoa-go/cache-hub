@@ -1,6 +1,6 @@
 # cache-hub（Go）
 
-参考 PHP `haoa/cache-hub` 的多级缓存库。业务用独立结构体定义 `GetLevels`、`Build` 和可选 `MultiBuild`；库负责分层读取、反向回填和单条构建锁。
+参考 PHP `haoa/cache-hub` 的多级缓存库。业务用独立结构体定义 `GetConfig`、`GetLevels`、`Build` 和可选 `MultiBuild`；库负责分层读取、反向回填和单条构建锁。
 
 要求 Go 1.23 或以上。Redis 连接由外部创建、注入和关闭，库不管理数据库查询。
 
@@ -20,9 +20,9 @@ h, err := cachehub.NewHubWithConfig(cachehub.HubConfig{
     Prefix: "myapp:go:",
     Lock: locker.NewRedis(client),
     Logger: appLogger, // 外部日志适配器，也可以传 nil。
-    Drivers: map[string]cachehub.Driver{
-        "memory": driver.NewMemory(10000),
-        "redis": driver.NewRedis(client),
+    Drivers: []cachehub.Driver{
+        driver.NewMemory(10000),
+        driver.NewRedis(client),
     },
     Serializers: map[string]cachehub.Serializer{
         "json": serializer.JSON{},
@@ -41,7 +41,7 @@ if err != nil {
 
 ## 业务缓存只声明层级与构建逻辑
 
-业务结构体不需要持有 Memory、Redis 或 Serializer 等基础设施字段，按名称选择即可。数据库等业务依赖仍可通过自己的结构体字段注入。
+业务结构体不需要持有 Memory、Redis 或 Serializer 等基础设施字段，按具体驱动类型选择即可。数据库等业务依赖仍可通过自己的结构体字段注入。
 
 ```go
 type User struct {
@@ -51,10 +51,17 @@ type User struct {
 
 type UserCache struct{}
 
+func (*UserCache) GetConfig() cachehub.Config {
+    cfg := cachehub.DefaultConfig("user")
+    cfg.CacheNull = true
+    cfg.LockEnabled = true // Hub 需配置 Locker。
+    return cfg
+}
+
 func (*UserCache) GetLevels() []cachehub.Level {
     return []cachehub.Level{
-        {DriverName: "memory", TTL: 5 * time.Second},
-        {DriverName: "redis", TTL: 300 * time.Second, NullTTL: 60 * time.Second},
+        {Name: "memory", DriverType: cachehub.TypeOfDriver[*driver.Memory](), TTL: 5 * time.Second},
+        {Name: "redis", DriverType: cachehub.TypeOfDriver[*driver.Redis](), TTL: 300 * time.Second, NullTTL: 60 * time.Second},
     }
 }
 
@@ -89,9 +96,7 @@ func (*UserCache) MultiBuild(ctx context.Context, ids []int) (map[int]*User, err
 创建并调用：
 
 ```go
-cfg := cachehub.DefaultConfig("user")
-cfg.LockEnabled = true
-cache, err := cachehub.New[int, *User](h, &UserCache{}, cfg)
+cache, err := cachehub.New[int, *User](h, &UserCache{})
 if err != nil {
     return err
 }
@@ -102,34 +107,33 @@ if err != nil {
 // result.Data == nil 表示不存在；result.Source 为 "memory"、"redis" 或 "build"。
 ```
 
-层级未设置 `Name` 时以 `DriverName` 作为来源名称。需要单层使用指定格式时配置 `SerializerName`。名称未注册会在构造业务缓存时返回错误；后续动态层级中的未知名称同样报错，不会自动忽略该层。
+层级通过 `DriverType: cachehub.TypeOfDriver[*driver.Redis]()` 引用已注册的具体驱动类型，IDE 可直接跳转到驱动定义。`Name` 只用于返回来源，未设置时使用具体 Go 类型名。未注册的类型、接口类型引用或重复注册同一类型均返回错误。需要单层使用指定格式时配置 `SerializerName`。
 
-保留原有 `NewHub(lock, prefix, logger)` 和层级直接传入 `Driver`、`Serializer` 实例的方式；名称与实例二选一，同时配置会返回错误。`New` 始终返回独立配置对象；新增的 `GetCache` 按业务类型复用实例，支持 `fresh=true` 重建并替换。
+保留原有 `NewHub(lock, prefix, logger)` 和层级直接传入 `Driver`、`Serializer` 实例的方式；驱动类型引用与实例二选一，序列化器名称与实例二选一，同时配置会返回错误。`New` 始终返回独立配置对象；新增的 `GetCache` 按业务类型复用实例，支持 `fresh=true` 重建并替换。
 
 完整可运行代码见 `examples/basic` 和 `examples/redis`。DI 接入示例见 [INITIALIZATION.md](INITIALIZATION.md)。
 
 ## 按业务类型复用缓存对象
 
-`GetCache` 对应 PHP 的 `getCache(类名, fresh)`：同一个 Hub 内，默认按业务具体类型复用完整 Cache 对象，包括其业务定义和配置。传入工厂函数用于延迟构造，工厂必须返回具体业务类型，例如 `*UserCache`，不能返回 `Definition` 接口。
+`GetCache` 对应 PHP 的 `getCache(类名, fresh)`：同一个 Hub 内，默认按业务具体类型复用完整 Cache 对象，包括其业务定义和配置。传入工厂函数用于延迟构造，工厂必须返回具体业务类型，例如 `*UserCache`，不能返回 `CacheDefinition` 接口。
 
 ```go
 newUserCache := func() *UserCache { return &UserCache{} }
-cfg := cachehub.DefaultConfig("user")
 
 // 首次创建并保存；后续默认返回同一对象，不再调用工厂。
-cache, err := cachehub.GetCache[int, *User](h, newUserCache, cfg)
+cache, err := cachehub.GetCache[int, *User](h, newUserCache)
 if err != nil {
     return err
 }
-same, err := cachehub.GetCache[int, *User](h, newUserCache, cfg, false)
+same, err := cachehub.GetCache[int, *User](h, newUserCache, false)
 // 无错误时 same == cache。
 
 // 创建新对象，并替换 Hub 中该业务类型原来保存的对象。
-fresh, err := cachehub.GetCache[int, *User](h, newUserCache, cfg, true)
+fresh, err := cachehub.GetCache[int, *User](h, newUserCache, true)
 // 无错误时 fresh != cache；下一次默认获取返回 fresh。
 ```
 
-复用时不使用新传入的 config 覆盖原配置；要用新配置重新构造，传 `fresh=true`。构造失败不缓存失败结果，也不替换已有对象。不同业务类型、不同 Hub 的实例独立；业务数据 Key 不作为对象复用标识，与 PHP 按类名缓存相对应。
+业务缓存必须实现 `GetConfig() Config`，集中声明 Key、空值缓存、版本、锁和参数编码。`New` 与 `GetCache` 不接收外部业务配置。配置在构造时读取一次并按值保存；复用时不重新读取，需重新读取时传 `fresh=true`。构造失败不缓存失败结果，也不替换已有对象。不同业务类型、不同 Hub 的实例独立；业务数据 Key 不作为对象复用标识，与 PHP 按类名缓存相对应。
 
 Hub 使用 `sync.Map` 保存实例，构造过程不加锁。首次并发获取允许少量重复构造，再用 `LoadOrStore` 返回同一已保存对象；工厂因此不应包含必须只执行一次的副作用。并发 fresh 调用各自创建独立对象，最终保存其中最后完成 Store 的对象。
 
@@ -169,7 +173,7 @@ Hub 使用 `sync.Map` 保存实例，构造过程不加锁。首次并发获取�
 
 | 配置 | 默认值 |
 | --- | --- |
-| `LockEnabled` | `false` |
+| `LockEnabled` | `true` |
 | `LockRetryCount` | `3` |
 | `LockRetryInterval` | `100ms` |
 | `LockTimeoutMode` | `LockTimeoutBuild`，即等待超时放行 |
@@ -177,13 +181,13 @@ Hub 使用 `sync.Map` 保存实例，构造过程不加锁。首次并发获取�
 | `NullValue` | 空字符串 |
 | `Versioned` / `Version` | `false` / `1` |
 
-只有普通单条 Get 遍历到最后一级，且该驱动 `CanLock()` 为 true 时才参与锁流程。内存驱动为 false，Redis 驱动为 true。设置 `LockRetryCount <= 0` 同 PHP 一样跳过锁流程。
+构建锁默认开启；使用 Redis 等可加锁驱动时，Hub 需配置 `Locker`。业务可在 `GetConfig()` 中设置 `LockEnabled = false` 关闭。只有普通单条 Get 遍历到最后一级，且该驱动 `CanLock()` 为 true 时才参与锁流程。内存驱动为 false，Redis 驱动为 true。设置 `LockRetryCount <= 0` 同 PHP 一样跳过锁流程。
 
 抢到锁后直接 Build，不复查缓存。未抢到锁则按配置等待：每次先查询最后一级缓存，仍未命中则检查锁；锁消失允许直接 Build，不重新抢锁。重试耗尽后，`LockTimeoutBuild` 放行，`LockTimeoutError` 返回 `ErrLockTimeout`。
 
-锁租期为 `round(重试次数 × 间隔秒数) + 10` 秒，不自动续租。Redis 锁保持 PHP 当前实现的固定值抢锁和直接删除解锁；尚未加入所有权校验。长构建超过租期以及超时放行都可能重复回源。这是本版保留的 PHP 行为。
+锁租期为 `round(重试次数 × 间隔秒数) + 10` 秒，不自动续租。每次 Redis 加锁使用独立随机 token；成功后返回 `LockHandle`，解锁通过 Lua 原子校验 token 并删除。过期的旧句柄不能删除新持有者的锁。内存锁同样按独立句柄校验所有权。长构建超过租期以及超时放行仍可能重复回源。
 
-锁会保持到回填结束；Build 或回填返回错误时也会释放。未取得锁的请求不执行解锁。清理使用独立的 1 秒 context，避免请求取消导致锁无法释放；这不限制 Build 的执行时间。解锁执行错误向外返回。
+锁会保持到回填结束；Build 或回填返回错误时也会释放。未取得锁的请求不执行解锁。清理使用独立的 1 秒 context，避免请求取消导致锁无法释放；这不限制 Build 的执行时间。解锁执行错误向外返回；已过期或不再拥有锁时返回 false，不视为执行错误。
 
 库不会设置 Build 超时，也不替换传给 Build/MultiBuild 的 context。业务可自行用 `context.WithTimeout` 配合数据库 `QueryContext`。
 
@@ -254,3 +258,30 @@ go run ./examples/redis
 容器内可将地址改成 `db-redis-1:6379`；宿主机使用其映射端口。集成测试默认数据库为 11，只操作唯一前缀内的已知 Key，测试结束删除这些 Key，不调用 FLUSHDB。
 
 PHP 的优化建议见 `PHP_OPTIMIZATION.md`；本次不修改 PHP。
+
+
+## 项目级默认配置
+
+Go 通过嵌入复用项目默认配置，无需库提供全局可变配置。业务类型在自己的 `GetConfig()` 中调用 `BaseCache.GetConfig()`，再覆盖业务字段；配置按值返回，各缓存独立。
+
+```go
+type BaseCache struct{}
+
+func (BaseCache) GetConfig() cachehub.Config {
+    cfg := cachehub.DefaultConfig("")
+    cfg.LockEnabled = true
+    cfg.CacheNull = true
+    return cfg
+}
+
+type UserCache struct { BaseCache }
+
+func (c *UserCache) GetConfig() cachehub.Config {
+    cfg := c.BaseCache.GetConfig()
+    cfg.Key = "user"
+    // cfg.LockEnabled = false // 业务可覆盖项目默认值。
+    return cfg
+}
+```
+
+业务仍需提供 `GetLevels()` 和 `Build()`。`BaseCache` 的空 Key 是待业务补充的配置，不能直接用作完整缓存定义。Go 嵌入不提供 PHP 的虚方法继承语义，因此业务重写配置时需显式调用嵌入类型的方法。

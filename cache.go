@@ -18,20 +18,21 @@ var (
 )
 
 // Cache 的配置属于本对象；Hub 和底层驱动可以复用。
-// 调用期间不可并发修改 Config、Hub、Definition 和层级配置。
+// 调用期间不可并发修改 Config、Hub、CacheDefinition 和层级配置。
 type Cache[K comparable, V any] struct {
 	Config     Config
 	hub        *Hub
-	definition Definition[K, V]
+	definition CacheDefinition[K, V]
 	sourceMu   sync.RWMutex
 	source     any
 }
 
-func New[K comparable, V any](hub *Hub, definition Definition[K, V], config Config) (*Cache[K, V], error) {
-	if hub == nil || definition == nil {
+// K 为可比较的查询参数类型，V 为缓存数据类型；hub 为共享 Hub，definition 为业务缓存定义。
+func New[K comparable, V any](hub *Hub, definition CacheDefinition[K, V]) (*Cache[K, V], error) {
+	if hub == nil || isNil(definition) {
 		return nil, errors.New("Hub 和业务定义不能为空")
 	}
-	c := &Cache[K, V]{hub: hub, definition: definition, Config: config}
+	c := &Cache[K, V]{hub: hub, definition: definition, Config: definition.GetConfig()}
 	if _, err := c.levels(); err != nil {
 		return nil, err
 	}
@@ -109,6 +110,7 @@ func (c *Cache[K, V]) levels() ([]Level, error) {
 }
 
 // MakeKey 与 PHP 一样，将非空参数追加到业务 Key 后；可通过 KeyParams 自定义。
+// params 为用于拼接缓存 Key 的查询参数。
 func (c *Cache[K, V]) MakeKey(params K) string {
 	suffix := ""
 	if c.Config.KeyParams != nil {
@@ -242,6 +244,7 @@ func (c *Cache[K, V]) wrap(data V) V {
 }
 
 // Get 的 skipLevels 跳过前几层读取，但最终仍回填这些层。
+// ctx 为请求上下文，params 为查询参数。skipLevels 为跳过读取的层数，默认 0，最多一个值。
 func (c *Cache[K, V]) Get(ctx context.Context, params K, skipLevels ...int) (resultOut Result[V], resultErr error) {
 	var zero Result[V]
 	levels, err := c.levels()
@@ -329,16 +332,16 @@ func (c *Cache[K, V]) lockAndWait(ctx context.Context, l Level, key string) (V, 
 	}
 	lockKey := key + "_lock"
 	ttl := time.Duration(math.Round(float64(cfg.LockRetryCount)*cfg.LockRetryInterval.Seconds())+10) * time.Second
-	acquired, err := c.hub.Lock.TryLock(ctx, lockKey, ttl)
+	handle, err := c.hub.Lock.TryLock(ctx, lockKey, ttl)
 	if err != nil {
 		return zero, false, nil, err
 	}
-	if acquired {
+	if !isNil(handle) {
 		release := func() error {
 			// 清理锁不依赖已取消的请求；这不是 Build 的执行期限。
 			cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Second)
 			defer cancel()
-			_, e := c.hub.Lock.Unlock(cleanup, lockKey)
+			_, e := handle.Unlock(cleanup)
 			if e != nil {
 				return fmt.Errorf("释放缓存锁失败: %w", e)
 			}
@@ -383,6 +386,7 @@ func (c *Cache[K, V]) lockAndWait(ctx context.Context, l Level, key string) (V, 
 }
 
 // MultiGet 与 PHP 一致：未命中后直接一次 MultiBuild，不参与锁流程。
+// ctx 为请求上下文，params 为查询参数列表。
 func (c *Cache[K, V]) MultiGet(ctx context.Context, params []K) (MultiResult[K, V], error) {
 	var zero MultiResult[K, V]
 	levels, err := c.levels()
@@ -500,6 +504,7 @@ func (c *Cache[K, V]) MultiGet(ctx context.Context, params []K) (MultiResult[K, 
 }
 
 // Update 与 PHP 一致，直接 Build，不加锁；返回写入成功的层数。
+// ctx 为请求上下文，params 为查询参数。
 func (c *Cache[K, V]) Update(ctx context.Context, params K) (int, error) {
 	levels, err := c.levels()
 	if err != nil {
@@ -525,6 +530,8 @@ func (c *Cache[K, V]) Update(ctx context.Context, params K) (int, error) {
 	}
 	return count, nil
 }
+
+// ctx 为请求上下文，params 为查询参数。
 func (c *Cache[K, V]) Delete(ctx context.Context, params K) (int, error) {
 	levels, err := c.levels()
 	if err != nil {
@@ -542,6 +549,8 @@ func (c *Cache[K, V]) Delete(ctx context.Context, params K) (int, error) {
 	}
 	return count, nil
 }
+
+// ctx 为请求上下文，params 为查询参数列表。
 func (c *Cache[K, V]) MultiDelete(ctx context.Context, params []K) (map[string]int, error) {
 	levels, err := c.levels()
 	if err != nil {

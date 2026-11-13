@@ -22,6 +22,7 @@ type Memory struct {
 	order    *list.List
 }
 
+// capacity 为最大缓存条目数，小于等于 0 时使用 10000。
 func NewMemory(capacity int) *Memory {
 	if capacity <= 0 {
 		capacity = 10000
@@ -29,6 +30,8 @@ func NewMemory(capacity int) *Memory {
 	return &Memory{capacity: capacity, entries: make(map[string]*list.Element), order: list.New()}
 }
 func (*Memory) CanLock() bool { return false }
+
+// ctx 为请求上下文，key 为缓存 Key。
 func (m *Memory) Get(ctx context.Context, key string) ([]byte, bool, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, false, err
@@ -48,6 +51,8 @@ func (m *Memory) Get(ctx context.Context, key string) ([]byte, bool, error) {
 	m.order.MoveToFront(el)
 	return append([]byte(nil), e.data...), true, nil
 }
+
+// ctx 为请求上下文，key 为缓存 Key，data 为缓存字节数据，ttl 为有效期。
 func (m *Memory) Set(ctx context.Context, key string, data []byte, ttl time.Duration) (bool, error) {
 	if err := ctx.Err(); err != nil {
 		return false, err
@@ -71,6 +76,8 @@ func (m *Memory) Set(ctx context.Context, key string, data []byte, ttl time.Dura
 	}
 	return true, nil
 }
+
+// ctx 为请求上下文，key 为缓存 Key。
 func (m *Memory) Delete(ctx context.Context, key string) (bool, error) {
 	if err := ctx.Err(); err != nil {
 		return false, err
@@ -84,6 +91,8 @@ func (m *Memory) Delete(ctx context.Context, key string) (bool, error) {
 	}
 	return false, nil
 }
+
+// ctx 为请求上下文，keys 为缓存 Key 列表。
 func (m *Memory) MultiGet(ctx context.Context, keys []string) (map[string][]byte, error) {
 	out := make(map[string][]byte, len(keys))
 	for _, key := range keys {
@@ -98,6 +107,7 @@ func (m *Memory) MultiGet(ctx context.Context, keys []string) (map[string][]byte
 	return out, nil
 }
 
+// ctx 为请求上下文，items 为 Key 到字节数据的映射，ttl 为有效期。
 func (m *Memory) MultiSet(ctx context.Context, items map[string][]byte, ttl time.Duration) (bool, error) {
 	success := true
 	for key, data := range items {
@@ -109,6 +119,8 @@ func (m *Memory) MultiSet(ctx context.Context, items map[string][]byte, ttl time
 	}
 	return success, nil
 }
+
+// ctx 为请求上下文，keys 为缓存 Key 列表。
 func (m *Memory) MultiDelete(ctx context.Context, keys []string) (int, error) {
 	count := 0
 	for _, key := range keys {

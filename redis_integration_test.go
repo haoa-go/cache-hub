@@ -45,17 +45,17 @@ func TestRedisIntegration(t *testing.T) {
 		client.Del(cleanup, keys...)
 	}()
 	f := newFixture(t)
-	f.def.levels = []hub.Level{{DriverName: "redis", TTL: time.Minute}}
+	f.def.levels = []hub.Level{{Name: "redis", DriverType: hub.TypeOfDriver[*driver.Redis](), TTL: time.Minute}}
 	cfg := hub.DefaultConfig("user")
 	cfg.LockEnabled = true
 	cfg.Versioned = true
 	h, err := hub.NewHubWithConfig(hub.HubConfig{
-		Prefix: prefix, Lock: l, Drivers: map[string]hub.Driver{"redis": d},
+		Prefix: prefix, Lock: l, Drivers: []hub.Driver{d},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	c, err := hub.New[int, *user](h, f.def, cfg)
+	c, err := hub.New[int, *user](h, configured(f.def, cfg))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -90,17 +90,29 @@ func TestRedisIntegration(t *testing.T) {
 	if r, e := c.Get(ctx, 4); e != nil || r.Source != "redis" || r.Data != nil {
 		t.Fatal(r, e)
 	}
-	if ok, e := l.TryLock(ctx, prefix+"lease", 30*time.Millisecond); e != nil || !ok {
-		t.Fatal(ok, e)
+	old, e := l.TryLock(ctx, prefix+"lease", 30*time.Millisecond)
+	if e != nil || old == nil {
+		t.Fatal("首次加锁失败", e)
 	}
-	if ok, e := l.TryLock(ctx, prefix+"lease", time.Second); e != nil || ok {
-		t.Fatal(ok, e)
+	if held, e := l.TryLock(ctx, prefix+"lease", time.Second); e != nil || held != nil {
+		t.Fatal("不应取得已被持有的锁", e)
 	}
 	time.Sleep(50 * time.Millisecond)
-	if ok, e := l.TryLock(ctx, prefix+"lease", time.Second); e != nil || !ok {
-		t.Fatal(ok, e)
+	current, e := l.TryLock(ctx, prefix+"lease", time.Second)
+	if e != nil || current == nil {
+		t.Fatal("过期后重新加锁失败", e)
 	}
-	if ok, e := l.Unlock(ctx, prefix+"lease"); e != nil || !ok {
-		t.Fatal(ok, e)
+	defer current.Unlock(context.Background())
+	if ok, e := old.Unlock(ctx); e != nil || ok {
+		t.Fatal("旧句柄不能删除新锁", ok, e)
+	}
+	if held, e := l.IsLocked(ctx, prefix+"lease"); e != nil || !held {
+		t.Fatal("新锁必须仍存在", held, e)
+	}
+	if ok, e := current.Unlock(ctx); e != nil || !ok {
+		t.Fatal("新持有者解锁失败", ok, e)
+	}
+	if ok, e := current.Unlock(ctx); e != nil || ok {
+		t.Fatal("重复解锁应无操作", ok, e)
 	}
 }

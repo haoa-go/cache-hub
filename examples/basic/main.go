@@ -18,8 +18,12 @@ type User struct {
 // UserCache 是业务缓存类型，真实项目可在这里注入数据库连接。
 type UserCache struct{}
 
+func (*UserCache) GetConfig() hub.Config {
+	return hub.DefaultConfig("user")
+}
+
 func (u *UserCache) GetLevels() []hub.Level {
-	return []hub.Level{{Name: "memory", DriverName: "memory", TTL: time.Minute, NullTTL: 10 * time.Second}}
+	return []hub.Level{{Name: "memory", DriverType: hub.TypeOfDriver[*driver.Memory](), TTL: time.Minute, NullTTL: 10 * time.Second}}
 }
 func (*UserCache) Build(ctx context.Context, id int) (*User, error) {
 	if err := ctx.Err(); err != nil {
@@ -49,12 +53,12 @@ func (*UserCache) MultiBuild(ctx context.Context, ids []int) (map[int]*User, err
 func main() {
 	h, err := hub.NewHubWithConfig(hub.HubConfig{
 		Prefix:  "example:",
-		Drivers: map[string]hub.Driver{"memory": driver.NewMemory(1000)},
+		Drivers: []hub.Driver{driver.NewMemory(1000)},
 	})
 	if err != nil {
 		log.Fatal("初始化 Hub 失败：", err)
 	}
-	cache, err := hub.GetCache[int, *User](h, func() *UserCache { return &UserCache{} }, hub.DefaultConfig("user"))
+	cache, err := hub.GetCache[int, *User](h, func() *UserCache { return &UserCache{} })
 	if err != nil {
 		log.Fatal("初始化失败：", err)
 	}

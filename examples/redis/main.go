@@ -22,10 +22,16 @@ type User struct {
 }
 type UserCache struct{}
 
+func (*UserCache) GetConfig() hub.Config {
+	cfg := hub.DefaultConfig("user")
+	cfg.LockEnabled = true
+	return cfg
+}
+
 func (u *UserCache) GetLevels() []hub.Level {
 	return []hub.Level{
-		{Name: "memory", DriverName: "memory", TTL: 5 * time.Second},
-		{Name: "redis", DriverName: "redis", TTL: 300 * time.Second, NullTTL: 60 * time.Second, SerializerName: "json"},
+		{Name: "memory", DriverType: hub.TypeOfDriver[*driver.Memory](), TTL: 5 * time.Second},
+		{Name: "redis", DriverType: hub.TypeOfDriver[*driver.Redis](), TTL: 300 * time.Second, NullTTL: 60 * time.Second, SerializerName: "json"},
 	}
 }
 func (*UserCache) Build(ctx context.Context, id int) (*User, error) {
@@ -78,18 +84,16 @@ func main() {
 		Prefix: "cachehub:go:example:",
 		Lock:   locker.NewRedis(client),
 		Logger: slogAdapter{slog.Default()},
-		Drivers: map[string]hub.Driver{
-			"memory": driver.NewMemory(10000),
-			"redis":  driver.NewRedis(client),
+		Drivers: []hub.Driver{
+			driver.NewMemory(10000),
+			driver.NewRedis(client),
 		},
 		Serializers: map[string]hub.Serializer{"json": serializer.JSON{}},
 	})
 	if err != nil {
 		log.Fatal("初始化 Hub 失败：", err)
 	}
-	cfg := hub.DefaultConfig("user")
-	cfg.LockEnabled = true
-	cache, err := hub.GetCache[int, *User](h, func() *UserCache { return &UserCache{} }, cfg)
+	cache, err := hub.GetCache[int, *User](h, func() *UserCache { return &UserCache{} })
 	if err != nil {
 		log.Fatal("初始化失败：", err)
 	}

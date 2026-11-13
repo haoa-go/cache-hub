@@ -2,6 +2,7 @@ package cachehub
 
 import (
 	"fmt"
+	"reflect"
 
 	"github.com/haoa-go/cache-hub/serializer"
 )
@@ -12,22 +13,27 @@ type HubConfig struct {
 	Prefix      string
 	Lock        Locker
 	Logger      Logger
-	Drivers     map[string]Driver
+	Drivers     []Driver
 	Serializers map[string]Serializer
 	// DefaultSerializer 是已注册序列化器名称，留空时使用 json。
 	DefaultSerializer string
 }
 
-// NewHubWithConfig 集中配置基础设施，复制注册表，供多个业务缓存复用。
-// 返回后修改传入的 map 不影响 Hub，驱动与序列化器实例本身共享。
+// NewHubWithConfig 集中配置基础设施，复制驱动列表及序列化器注册表，供多个业务缓存复用。
+// 返回后修改传入的列表或 map 不影响 Hub，驱动与序列化器实例本身共享。
+// config 为共享驱动、序列化器、锁、日志和前缀配置。
 func NewHubWithConfig(config HubConfig) (*Hub, error) {
 	h := NewHub(config.Lock, config.Prefix, config.Logger)
-	h.drivers = make(map[string]Driver, len(config.Drivers))
-	for name, d := range config.Drivers {
-		if name == "" || isNil(d) {
-			return nil, fmt.Errorf("注册的缓存驱动名称或实例无效：%q", name)
+	h.drivers = make(map[reflect.Type]Driver, len(config.Drivers))
+	for _, d := range config.Drivers {
+		if isNil(d) {
+			return nil, fmt.Errorf("注册的缓存驱动不能为空")
 		}
-		h.drivers[name] = d
+		typ := reflect.TypeOf(d)
+		if _, exists := h.drivers[typ]; exists {
+			return nil, fmt.Errorf("缓存驱动类型重复注册：%s", typ)
+		}
+		h.drivers[typ] = d
 	}
 	h.serializers = map[string]Serializer{"json": serializer.JSON{}}
 	for name, s := range config.Serializers {
@@ -49,18 +55,18 @@ func NewHubWithConfig(config HubConfig) (*Hub, error) {
 }
 
 func (h *Hub) resolveLevel(level Level) (Level, error) {
-	if level.DriverName != "" {
+	if typ := level.DriverType.typ; typ != nil {
 		if level.Driver != nil {
-			return level, fmt.Errorf("层级不能同时配置 Driver 和 DriverName：%s", level.Name)
+			return level, fmt.Errorf("层级不能同时配置 Driver 和 DriverType：%s", level.Name)
 		}
-		d, ok := h.drivers[level.DriverName]
+		if typ.Kind() == reflect.Interface {
+			return level, fmt.Errorf("驱动引用必须使用具体类型：%s", typ)
+		}
+		d, ok := h.drivers[typ]
 		if !ok {
-			return level, fmt.Errorf("缓存驱动未注册：%s", level.DriverName)
+			return level, fmt.Errorf("缓存驱动类型未注册：%s", typ)
 		}
 		level.Driver = d
-		if level.Name == "" {
-			level.Name = level.DriverName
-		}
 	}
 	if isNil(level.Driver) {
 		return level, fmt.Errorf("缓存驱动不能为空")
