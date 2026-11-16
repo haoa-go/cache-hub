@@ -10,11 +10,15 @@ import (
 // HubConfig 是与应用框架无关的初始化入口。
 // 调用方管理连接、日志及依赖的生命周期，库不创建全局单例。
 type HubConfig struct {
-	Prefix      string
-	Lock        Locker
-	Logger      Logger
-	Drivers     []Driver
+	Prefix  string
+	Lock    Locker
+	Logger  Logger
+	Drivers []Driver
+	// Serializers 保留按名称注册方式，供 SerializerName 引用。
 	Serializers map[string]Serializer
+	// SerializerInstances 按具体类型注册共享实例，供 SerializerType 引用。
+	// 同一类型只能注册一次，实例须支持并发调用；内置注册 *serializer.JSON。
+	SerializerInstances []Serializer
 	// DefaultSerializer 是已注册序列化器名称，留空时使用 json。
 	DefaultSerializer string
 }
@@ -35,7 +39,25 @@ func NewHubWithConfig(config HubConfig) (*Hub, error) {
 		}
 		h.drivers[typ] = d
 	}
-	h.serializers = map[string]Serializer{"json": serializer.JSON{}}
+	jsonSerializer := &serializer.JSON{}
+	h.serializers = map[string]Serializer{"json": jsonSerializer}
+	h.serializersByType = map[reflect.Type]Serializer{reflect.TypeOf(jsonSerializer): jsonSerializer}
+	registered := make(map[reflect.Type]bool)
+	for _, s := range config.SerializerInstances {
+		if isNil(s) {
+			return nil, fmt.Errorf("注册的序列化器不能为空")
+		}
+		typ := reflect.TypeOf(s)
+		if registered[typ] {
+			return nil, fmt.Errorf("序列化器类型重复注册：%s", typ)
+		}
+		registered[typ] = true
+		h.serializersByType[typ] = s
+		// 显式注册 JSON 指针时，默认名称也复用该实例。
+		if typ == reflect.TypeOf(jsonSerializer) {
+			h.serializers["json"] = s
+		}
+	}
 	for name, s := range config.Serializers {
 		if name == "" || isNil(s) {
 			return nil, fmt.Errorf("注册的序列化器名称或实例无效：%q", name)
@@ -70,6 +92,29 @@ func (h *Hub) resolveLevel(level Level) (Level, error) {
 	}
 	if isNil(level.Driver) {
 		return level, fmt.Errorf("缓存驱动不能为空")
+	}
+	selections := 0
+	if level.Serializer != nil {
+		selections++
+	}
+	if level.SerializerName != "" {
+		selections++
+	}
+	if level.SerializerType.typ != nil {
+		selections++
+	}
+	if selections > 1 {
+		return level, fmt.Errorf("层级的 Serializer、SerializerType 和 SerializerName 只能配置一个：%s", level.Name)
+	}
+	if typ := level.SerializerType.typ; typ != nil {
+		if typ.Kind() == reflect.Interface {
+			return level, fmt.Errorf("序列化器引用必须使用具体类型：%s", typ)
+		}
+		s, ok := h.serializersByType[typ]
+		if !ok {
+			return level, fmt.Errorf("序列化器类型未注册：%s", typ)
+		}
+		level.Serializer = s
 	}
 	if level.SerializerName != "" {
 		if level.Serializer != nil {

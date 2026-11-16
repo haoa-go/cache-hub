@@ -297,3 +297,19 @@ func (c *UserCache) GetConfig() cachehub.Config {
 应用创建 `github.com/dgraph-io/ristretto/v2` 的 `*ristretto.Cache[string, []byte]`，通过 `driver.NewRistretto(local)` 注入。驱动不创建或关闭实例，业务层级使用 `TypeOfDriver[*driver.Ristretto]()`，TTL 可设为 1～5 秒。容量由应用配置 `MaxCost`，驱动以 `len(data)` 字节计费，Ristretto 默认还计入条目内部成本；计数器、缓冲等仍需额外内存，预算不是进程内存硬上限。
 
 写入保持异步语义：true 只表示提交成功，不保证准入或立即可读；未命中继续下一层。不要在每次写入后调用 Wait；测试中可使用 Wait 等待队列处理。Get/Set 复制字节，避免跨请求修改。Delete 返回删除前是否观测到有效项，MultiDelete 统计是并发下的近似值。负 TTL 不写入，零 TTL 不过期。
+
+## 按类型复用序列化器
+
+推荐与驱动一样，初始化时注册一次共享实例，业务层仅引用具体类型：
+
+```go
+// HubConfig 中配置；SerializerInstances 列表会被复制，实例本身共享。
+SerializerInstances: []cachehub.Serializer{&serializer.JSON{}},
+
+// Level 中配置，不创建 JSON 实例。
+SerializerType: cachehub.TypeOfSerializer[*serializer.JSON](),
+```
+
+未显式注册时，Hub 也内置注册 `*serializer.JSON`。指针类型与值类型不同，引用须与注册类型一致。自定义类型必须注册；同类型重复注册、空实例、接口类型引用和未知类型均报错。共享实例需支持并发使用。
+
+`Serializer`、`SerializerType`、`SerializerName` 三选一，均省略则使用默认序列化器。原有 `Serializers` 名称注册表和 `DefaultSerializer` 名称配置保持兼容；按类型注册使用独立的 `SerializerInstances` 列表，不会自动将名称注册表中的同类型多实例合并。

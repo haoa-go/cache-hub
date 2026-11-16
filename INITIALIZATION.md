@@ -86,3 +86,19 @@ fresh, err := cachehub.GetCache[int, *User](di.CacheHub(), func() *UserCache {
 `UserCache.GetLevels()` 只配置 `DriverType`、TTL 和可选 `SerializerName`，不需要逐个注入 Ristretto 或 Redis。若业务需要数据库，仍由业务自己的构造函数注入。
 
 Go 泛型通过 `cachehub.GetCache` 保留业务参数与返回值类型。Hub 按具体业务类型缓存对象，构造使用应用传入的工厂；不通过类名字符串反射调用构造函数。命中实例表时不会调用工厂，也不会覆盖原配置。`cachehub.New` 仍可始终创建独立对象。
+
+## 按类型复用序列化器
+
+推荐与驱动一样，初始化时注册一次共享实例，业务层仅引用具体类型：
+
+```go
+// HubConfig 中配置；SerializerInstances 列表会被复制，实例本身共享。
+SerializerInstances: []cachehub.Serializer{&serializer.JSON{}},
+
+// Level 中配置，不创建 JSON 实例。
+SerializerType: cachehub.TypeOfSerializer[*serializer.JSON](),
+```
+
+未显式注册时，Hub 也内置注册 `*serializer.JSON`。指针类型与值类型不同，引用须与注册类型一致。自定义类型必须注册；同类型重复注册、空实例、接口类型引用和未知类型均报错。共享实例需支持并发使用。
+
+`Serializer`、`SerializerType`、`SerializerName` 三选一，均省略则使用默认序列化器。原有 `Serializers` 名称注册表和 `DefaultSerializer` 名称配置保持兼容；按类型注册使用独立的 `SerializerInstances` 列表，不会自动将名称注册表中的同类型多实例合并。

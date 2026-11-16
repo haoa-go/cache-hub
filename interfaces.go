@@ -57,17 +57,28 @@ func TypeOfDriver[T Driver]() DriverType {
 	return DriverType{typ: reflect.TypeFor[T]()}
 }
 
+// SerializerType 引用 Hub 中共享的具体序列化器类型，不创建实例。
+type SerializerType struct{ typ reflect.Type }
+
+// TypeOfSerializer 要求 T 实现 Serializer；应使用已注册的具体类型，指针和值类型不同。
+func TypeOfSerializer[T Serializer]() SerializerType {
+	return SerializerType{typ: reflect.TypeFor[T]()}
+}
+
 type Level struct {
 	// Name 是层级及来源标识，同一业务中必须唯一。
 	Name string
 	// DriverType 按具体 Go 类型引用 Hub 中已注册的驱动。
 	DriverType DriverType
 	// Driver 保留直接注入方式，与 DriverType 二选一。
-	Driver     Driver
-	TTL        time.Duration
-	NullTTL    time.Duration
+	Driver  Driver
+	TTL     time.Duration
+	NullTTL time.Duration
+	// Serializer 直接注入实例，与 SerializerType、SerializerName 三选一。
 	Serializer Serializer
-	// SerializerName 选用已注册序列化器，与 Serializer 二选一。
+	// SerializerType 按具体类型引用 Hub 中已注册的共享序列化器。
+	SerializerType SerializerType
+	// SerializerName 选用已注册序列化器，与 Serializer、SerializerType 三选一。
 	SerializerName string
 }
 
@@ -147,6 +158,7 @@ type Hub struct {
 	Logger            Logger
 	drivers           map[reflect.Type]Driver
 	serializers       map[string]Serializer
+	serializersByType map[reflect.Type]Serializer
 	defaultSerializer Serializer
 	caches            sync.Map
 }
