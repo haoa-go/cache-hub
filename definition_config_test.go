@@ -3,11 +3,11 @@ package cachehub_test
 import (
 	"context"
 	"fmt"
+	"github.com/haoa-go/cache-hub/internal/testdriver"
 	"testing"
 	"time"
 
 	hub "github.com/haoa-go/cache-hub"
-	"github.com/haoa-go/cache-hub/driver"
 )
 
 type configuredUserCache struct {
@@ -24,7 +24,7 @@ func (d *configuredUserCache) GetConfig() hub.Config {
 }
 
 func (*configuredUserCache) GetLevels() []hub.Level {
-	return []hub.Level{{Name: "memory", DriverType: hub.TypeOfDriver[*driver.Memory](), TTL: time.Minute}}
+	return []hub.Level{{Name: "memory", DriverType: hub.TypeOfDriver[*testdriver.Memory](), TTL: time.Minute}}
 }
 
 func (d *configuredUserCache) Build(_ context.Context, id int) (*user, error) {
@@ -37,7 +37,7 @@ func (d *configuredUserCache) Build(_ context.Context, id int) (*user, error) {
 
 func TestDefinitionOwnsConfigAndTypedCache(t *testing.T) {
 	h, err := hub.NewHubWithConfig(hub.HubConfig{
-		Prefix: "test:", Drivers: []hub.Driver{driver.NewMemory(20)},
+		Prefix: "test:", Drivers: []hub.Driver{testdriver.NewMemory(20)},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -71,7 +71,7 @@ func TestDefinitionOwnsConfigAndTypedCache(t *testing.T) {
 
 func TestDefinitionConfigOnReuseAndFresh(t *testing.T) {
 	// 使用同一内存驱动，业务对象仍由工厂独立构造。
-	h, err := hub.NewHubWithConfig(hub.HubConfig{Drivers: []hub.Driver{driver.NewMemory(10)}})
+	h, err := hub.NewHubWithConfig(hub.HubConfig{Drivers: []hub.Driver{testdriver.NewMemory(10)}})
 	if err != nil {
 		t.Fatal(err)
 	}

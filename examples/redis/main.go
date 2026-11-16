@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"github.com/dgraph-io/ristretto/v2"
 	"log"
 	"log/slog"
 	"os"
@@ -30,7 +31,7 @@ func (*UserCache) GetConfig() hub.Config {
 
 func (u *UserCache) GetLevels() []hub.Level {
 	return []hub.Level{
-		{Name: "memory", DriverType: hub.TypeOfDriver[*driver.Memory](), TTL: 5 * time.Second},
+		{Name: "memory", DriverType: hub.TypeOfDriver[*driver.Ristretto](), TTL: 5 * time.Second},
 		{Name: "redis", DriverType: hub.TypeOfDriver[*driver.Redis](), TTL: 300 * time.Second, NullTTL: 60 * time.Second, SerializerName: "json"},
 	}
 }
@@ -66,6 +67,11 @@ func (l slogAdapter) Debug(message string) { l.logger.Debug(message) }
 func (l slogAdapter) Error(message string) { l.logger.Error(message) }
 
 func main() {
+	local, err := ristretto.NewCache(&ristretto.Config[string, []byte]{NumCounters: 100000, MaxCost: 64 << 20, BufferItems: 64})
+	if err != nil {
+		log.Fatal("初始化本地缓存失败：", err)
+	}
+	defer local.Close()
 	addr := os.Getenv("CACHEHUB_REDIS_ADDR")
 	if addr == "" {
 		addr = "127.0.0.1:6379"
@@ -85,7 +91,7 @@ func main() {
 		Lock:   locker.NewRedis(client),
 		Logger: slogAdapter{slog.Default()},
 		Drivers: []hub.Driver{
-			driver.NewMemory(10000),
+			driver.NewRistretto(local),
 			driver.NewRedis(client),
 		},
 		Serializers: map[string]hub.Serializer{"json": serializer.JSON{}},

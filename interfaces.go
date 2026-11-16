@@ -100,23 +100,40 @@ const (
 	LockTimeoutError LockTimeoutMode = 2
 )
 
-// Config 可在独立对象上修改；并发调用期间不要修改配置和业务对象。
+// Config 定义单个业务缓存的键、空值、版本和构建锁策略。
+// 建议通过 DefaultConfig 创建后修改所需字段；直接使用零值不等价于默认配置。
+// 配置可在独立对象上修改，但并发调用期间不要修改配置和业务对象。
 type Config struct {
-	Key       string
+	// Key 为必填业务缓存键，与 Hub.Prefix 和查询参数共同组成最终缓存键。
+	Key string
+	// NullValue 是空结果写入缓存时的占位值，DefaultConfig 默认使用空字符串。
+	// 应使用 nil、false 或空字符串等可被识别为空值的值；命中后返回数据类型的零值。
 	NullValue any
+	// CacheNull 控制单条构建的空结果是否缓存，默认 true，过期时间使用层级的 NullTTL。
+	// nil、false 和空字符串视为空结果；批量查询始终不回填空结果。
 	CacheNull bool
+	// Versioned 控制是否包装并校验正常数据的版本号，默认 false；空值占位不包装版本。
 	Versioned bool
-	Version   int
-	// LockEnabled 控制单条回源构建锁，DefaultConfig 默认开启。
-	LockEnabled       bool
-	LockRetryCount    int
+	// Version 为 Versioned 开启时使用的数据版本号，默认 1。
+	// 版本不匹配视为缓存未命中；版本号不参与缓存键拼接。
+	Version int
+	// LockEnabled 控制普通单条 Get 的回源构建锁，默认 true。
+	// 仅最后一级驱动支持锁时生效，需配置 Hub.Lock；批量、Update 和直接 Build 路径不加锁。
+	LockEnabled bool
+	// LockRetryCount 为未取得锁时最多等待并检查缓存、锁状态的次数，默认 3；小于等于 0 时跳过锁流程。
+	LockRetryCount int
+	// LockRetryInterval 为每次等待检查前的间隔，默认 100ms，不允许负数。
+	// 与重试次数共同决定等待时长和锁租期，不限制 Build 的执行时间。
 	LockRetryInterval time.Duration
-	LockTimeoutMode   LockTimeoutMode
-	// KeyParams 的 params 为查询参数，返回缓存键的参数部分。
+	// LockTimeoutMode 指定等待次数耗尽后的行为，默认 LockTimeoutBuild，允许直接回源。
+	// 设置为 LockTimeoutError 时返回 ErrLockTimeout；锁提前消失时仍允许直接回源。
+	LockTimeoutMode LockTimeoutMode
+	// KeyParams 自定义查询参数到缓存键后缀的转换，默认 nil，使用内置参数拼接规则。
+	// 函数应返回稳定且可区分不同参数的字符串；空字符串或 "0" 不追加到业务键。
 	KeyParams func(params any) string
 }
 
-// key 为业务缓存 Key。
+// DefaultConfig 返回指定业务键的默认配置；key 不能为空。
 func DefaultConfig(key string) Config {
 	return Config{Key: key, NullValue: "", CacheNull: true, LockEnabled: true, Version: 1,
 		LockRetryCount: 3, LockRetryInterval: 100 * time.Millisecond, LockTimeoutMode: LockTimeoutBuild}

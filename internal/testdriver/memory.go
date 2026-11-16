@@ -1,5 +1,5 @@
-// Package driver 提供内存和 Redis 缓存驱动。
-package driver
+// Package testdriver 提供缓存流程测试使用的同步内存夹具。
+package testdriver
 
 import (
 	"container/list"

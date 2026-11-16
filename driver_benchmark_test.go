@@ -2,19 +2,29 @@ package cachehub_test
 
 import (
 	"context"
+	"github.com/dgraph-io/ristretto/v2"
+	"github.com/haoa-go/cache-hub/driver"
 	"reflect"
 	"testing"
 	"time"
 
 	hub "github.com/haoa-go/cache-hub"
-	"github.com/haoa-go/cache-hub/driver"
 )
 
 var benchmarkDriver hub.Driver
 
+func newBenchmarkRistretto(b *testing.B) *driver.Ristretto {
+	client, err := ristretto.NewCache(&ristretto.Config[string, []byte]{NumCounters: 1000, MaxCost: 1 << 20, BufferItems: 64})
+	if err != nil {
+		b.Fatal(err)
+	}
+	b.Cleanup(client.Close)
+	return driver.NewRistretto(client)
+}
+
 // 对比驱动选择本身；类型路径包含每次取得类型描述符的成本。
 func BenchmarkDriverLookup(b *testing.B) {
-	d := driver.NewMemory(10)
+	d := newBenchmarkRistretto(b)
 	byName := map[string]hub.Driver{"memory": d}
 	byType := map[reflect.Type]hub.Driver{reflect.TypeOf(d): d}
 	b.Run("字符串", func(b *testing.B) {
@@ -26,7 +36,7 @@ func BenchmarkDriverLookup(b *testing.B) {
 	b.Run("类型描述符", func(b *testing.B) {
 		b.ReportAllocs()
 		for i := 0; i < b.N; i++ {
-			benchmarkDriver = byType[reflect.TypeFor[*driver.Memory]()]
+			benchmarkDriver = byType[reflect.TypeFor[*driver.Ristretto]()]
 		}
 	})
 }
@@ -47,7 +57,7 @@ func BenchmarkMemoryHitDriverSelection(b *testing.B) {
 			name = "类型引用"
 		}
 		b.Run(name, func(b *testing.B) {
-			d := driver.NewMemory(10)
+			d := newBenchmarkRistretto(b)
 			h, err := hub.NewHubWithConfig(hub.HubConfig{Drivers: []hub.Driver{d}})
 			if err != nil {
 				b.Fatal(err)
@@ -55,7 +65,7 @@ func BenchmarkMemoryHitDriverSelection(b *testing.B) {
 			level := hub.Level{Driver: d, TTL: time.Hour}
 			if typed {
 				level.Driver = nil
-				level.DriverType = hub.TypeOfDriver[*driver.Memory]()
+				level.DriverType = hub.TypeOfDriver[*driver.Ristretto]()
 			}
 			c, err := hub.New[int, *user](h, &benchmarkDefinition{level: level})
 			if err != nil {
@@ -65,6 +75,7 @@ func BenchmarkMemoryHitDriverSelection(b *testing.B) {
 			if _, err := c.Get(ctx, 1); err != nil {
 				b.Fatal(err)
 			}
+			d.Client.Wait()
 			b.ReportAllocs()
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {

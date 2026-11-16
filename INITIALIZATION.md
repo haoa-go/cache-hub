@@ -7,13 +7,13 @@
 应用启动时创建一次 Hub，传给需要构造缓存的业务模块即可。无需 DI 框架，也不要求使用全局变量：
 
 ```go
-func NewCacheHub(client redis.UniversalClient, logger cachehub.Logger) (*cachehub.Hub, error) {
+func NewCacheHub(local *ristretto.Cache[string, []byte], client redis.UniversalClient, logger cachehub.Logger) (*cachehub.Hub, error) {
     return cachehub.NewHubWithConfig(cachehub.HubConfig{
         Prefix: "myapp:go:",
         Lock: locker.NewRedis(client),
         Logger: logger,
         Drivers: []cachehub.Driver{
-            driver.NewMemory(10000),
+            driver.NewRistretto(local),
             driver.NewRedis(client),
         },
         // 不指定时默认使用内置 json；可注册并选用其他格式。
@@ -42,7 +42,7 @@ func init() {
         Name: "cachehub",
         New: func() (interface{}, error) {
             // 项目提供 Redis client；可传入项目自己的日志适配器替换 nil。
-            return NewCacheHub(GoRedis(), nil)
+            return NewCacheHub(Ristretto(), GoRedis(), nil)
         },
     }
     if err := xdi.Provide(&obj); err != nil {
@@ -58,7 +58,7 @@ func CacheHub() (h *cachehub.Hub) {
 }
 ```
 
-`GoRedis()` 由应用提供。工厂中的 driver、locker、redis 类型对应本模块的子包和 go-redis；具体数据库、前缀、日志、生命周期均由项目管理。
+`Ristretto()` 和 `GoRedis()` 由应用提供；前者返回应用创建的 Ristretto 实例，应用负责配置容量并在所有操作停止后 Close。工厂中的 driver、locker、redis 类型对应本模块的子包和 go-redis；具体数据库、前缀、日志、生命周期均由项目管理。
 
 业务定义集中配置 Key、空值策略、版本和锁；构造时自动读取：
 
@@ -83,6 +83,6 @@ fresh, err := cachehub.GetCache[int, *User](di.CacheHub(), func() *UserCache {
 }, true)
 ```
 
-`UserCache.GetLevels()` 只配置 `DriverType`、TTL 和可选 `SerializerName`，不需要逐个注入 Memory 或 Redis。若业务需要数据库，仍由业务自己的构造函数注入。
+`UserCache.GetLevels()` 只配置 `DriverType`、TTL 和可选 `SerializerName`，不需要逐个注入 Ristretto 或 Redis。若业务需要数据库，仍由业务自己的构造函数注入。
 
 Go 泛型通过 `cachehub.GetCache` 保留业务参数与返回值类型。Hub 按具体业务类型缓存对象，构造使用应用传入的工厂；不通过类名字符串反射调用构造函数。命中实例表时不会调用工厂，也不会覆盖原配置。`cachehub.New` 仍可始终创建独立对象。

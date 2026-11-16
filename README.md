@@ -2,13 +2,19 @@
 
 参考 PHP `haoa/cache-hub` 的多级缓存库。业务用独立结构体定义 `GetConfig`、`GetLevels`、`Build` 和可选 `MultiBuild`；库负责分层读取、反向回填和单条构建锁。
 
-要求 Go 1.23 或以上。Redis 连接由外部创建、注入和关闭，库不管理数据库查询。
+要求 Go 1.24 或以上。Redis 连接由外部创建、注入和关闭，库不管理数据库查询。
 
 ## 统一初始化入口
 
 库提供与框架无关的 `NewHubWithConfig`，集中注册驱动、序列化器、锁、日志和前缀。应用决定何时创建、是否使用单例、是否交给 DI 管理；库不绑定 xdi、Viper，也不自动读取环境变量。
 
 ```go
+local, err := ristretto.NewCache(&ristretto.Config[string, []byte]{
+    NumCounters: 100000, MaxCost: 64 << 20, BufferItems: 64,
+})
+if err != nil { return err }
+defer local.Close() // 在应用退出、所有缓存操作停止后关闭。
+
 client := redis.NewClient(&redis.Options{
     Addr: "127.0.0.1:6379",
     DB: 11,
@@ -21,7 +27,7 @@ h, err := cachehub.NewHubWithConfig(cachehub.HubConfig{
     Lock: locker.NewRedis(client),
     Logger: appLogger, // 外部日志适配器，也可以传 nil。
     Drivers: []cachehub.Driver{
-        driver.NewMemory(10000),
+        driver.NewRistretto(local),
         driver.NewRedis(client),
     },
     Serializers: map[string]cachehub.Serializer{
@@ -41,7 +47,7 @@ if err != nil {
 
 ## 业务缓存只声明层级与构建逻辑
 
-业务结构体不需要持有 Memory、Redis 或 Serializer 等基础设施字段，按具体驱动类型选择即可。数据库等业务依赖仍可通过自己的结构体字段注入。
+业务结构体不需要持有 Ristretto、Redis 或 Serializer 等基础设施字段，按具体驱动类型选择即可。数据库等业务依赖仍可通过自己的结构体字段注入。
 
 ```go
 type User struct {
@@ -60,7 +66,7 @@ func (*UserCache) GetConfig() cachehub.Config {
 
 func (*UserCache) GetLevels() []cachehub.Level {
     return []cachehub.Level{
-        {Name: "memory", DriverType: cachehub.TypeOfDriver[*driver.Memory](), TTL: 5 * time.Second},
+        {Name: "memory", DriverType: cachehub.TypeOfDriver[*driver.Ristretto](), TTL: 5 * time.Second},
         {Name: "redis", DriverType: cachehub.TypeOfDriver[*driver.Redis](), TTL: 300 * time.Second, NullTTL: 60 * time.Second},
     }
 }
@@ -285,3 +291,9 @@ func (c *UserCache) GetConfig() cachehub.Config {
 ```
 
 业务仍需提供 `GetLevels()` 和 `Build()`。`BaseCache` 的空 Key 是待业务补充的配置，不能直接用作完整缓存定义。Go 嵌入不提供 PHP 的虚方法继承语义，因此业务重写配置时需显式调用嵌入类型的方法。
+
+## Ristretto 本地驱动
+
+应用创建 `github.com/dgraph-io/ristretto/v2` 的 `*ristretto.Cache[string, []byte]`，通过 `driver.NewRistretto(local)` 注入。驱动不创建或关闭实例，业务层级使用 `TypeOfDriver[*driver.Ristretto]()`，TTL 可设为 1～5 秒。容量由应用配置 `MaxCost`，驱动以 `len(data)` 字节计费，Ristretto 默认还计入条目内部成本；计数器、缓冲等仍需额外内存，预算不是进程内存硬上限。
+
+写入保持异步语义：true 只表示提交成功，不保证准入或立即可读；未命中继续下一层。不要在每次写入后调用 Wait；测试中可使用 Wait 等待队列处理。Get/Set 复制字节，避免跨请求修改。Delete 返回删除前是否观测到有效项，MultiDelete 统计是并发下的近似值。负 TTL 不写入，零 TTL 不过期。

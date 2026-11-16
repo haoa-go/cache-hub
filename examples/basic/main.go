@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"github.com/dgraph-io/ristretto/v2"
 	"log"
 	"time"
 
@@ -23,7 +24,7 @@ func (*UserCache) GetConfig() hub.Config {
 }
 
 func (u *UserCache) GetLevels() []hub.Level {
-	return []hub.Level{{Name: "memory", DriverType: hub.TypeOfDriver[*driver.Memory](), TTL: time.Minute, NullTTL: 10 * time.Second}}
+	return []hub.Level{{Name: "memory", DriverType: hub.TypeOfDriver[*driver.Ristretto](), TTL: time.Minute, NullTTL: 10 * time.Second}}
 }
 func (*UserCache) Build(ctx context.Context, id int) (*User, error) {
 	if err := ctx.Err(); err != nil {
@@ -51,9 +52,14 @@ func (*UserCache) MultiBuild(ctx context.Context, ids []int) (map[int]*User, err
 	return out, nil
 }
 func main() {
+	local, err := ristretto.NewCache(&ristretto.Config[string, []byte]{NumCounters: 100000, MaxCost: 64 << 20, BufferItems: 64})
+	if err != nil {
+		log.Fatal("初始化本地缓存失败：", err)
+	}
+	defer local.Close()
 	h, err := hub.NewHubWithConfig(hub.HubConfig{
 		Prefix:  "example:",
-		Drivers: []hub.Driver{driver.NewMemory(1000)},
+		Drivers: []hub.Driver{driver.NewRistretto(local)},
 	})
 	if err != nil {
 		log.Fatal("初始化 Hub 失败：", err)
@@ -64,6 +70,7 @@ func main() {
 	}
 	ctx := context.Background()
 	for i := 0; i < 2; i++ {
+		local.Wait()
 		result, e := cache.Get(ctx, 1)
 		if e != nil {
 			log.Fatal("查询失败：", e)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/haoa-go/cache-hub/internal/testdriver"
 	"reflect"
 	"strings"
 	"sync"
@@ -12,7 +13,7 @@ import (
 	"time"
 
 	hub "github.com/haoa-go/cache-hub"
-	"github.com/haoa-go/cache-hub/driver"
+
 	"github.com/haoa-go/cache-hub/locker"
 	"github.com/haoa-go/cache-hub/serializer"
 )
@@ -42,12 +43,12 @@ func (d *definition) WrapData(u *user) *user {
 }
 
 // 第二种驱动模拟 Redis 的可加锁属性，不需要外部服务。
-type sharedDriver struct{ *driver.Memory }
+type sharedDriver struct{ *testdriver.Memory }
 
 func (*sharedDriver) CanLock() bool { return true }
 
 type failedDriver struct {
-	*driver.Memory
+	*testdriver.Memory
 	setError  error
 	setOK     bool
 	readError error
@@ -103,7 +104,7 @@ func (l *countedLock) IsLocked(ctx context.Context, k string) (bool, error) {
 type fixture struct {
 	cache   *hub.Cache[int, *user]
 	def     *definition
-	local   *driver.Memory
+	local   *testdriver.Memory
 	shared  *sharedDriver
 	lock    *countedLock
 	builds  atomic.Int32
@@ -112,7 +113,7 @@ type fixture struct {
 
 func newFixture(t *testing.T) *fixture {
 	t.Helper()
-	f := &fixture{local: driver.NewMemory(100), shared: &sharedDriver{driver.NewMemory(100)}, lock: &countedLock{inner: locker.NewMemory()}}
+	f := &fixture{local: testdriver.NewMemory(100), shared: &sharedDriver{testdriver.NewMemory(100)}, lock: &countedLock{inner: locker.NewMemory()}}
 	f.def = &definition{levels: []hub.Level{
 		{Name: "memory", Driver: f.local, TTL: time.Minute},
 		{Name: "redis", Driver: f.shared, TTL: time.Minute},
@@ -290,7 +291,7 @@ func TestWriteFalseVersusError(t *testing.T) {
 		t.Run(fmt.Sprint(throw), func(t *testing.T) {
 			f := newFixture(t)
 			log := &logRecorder{}
-			d := &failedDriver{Memory: driver.NewMemory(10)}
+			d := &failedDriver{Memory: testdriver.NewMemory(10)}
 			if throw {
 				d.setError = errors.New("写入执行错误")
 			}
@@ -320,7 +321,7 @@ func TestBuildErrorAndReadError(t *testing.T) {
 	if _, ok, _ := f.local.Get(context.Background(), f.cache.MakeKey(1)); ok {
 		t.Fatal("构建错误不能写入缓存")
 	}
-	f.def.levels = []hub.Level{{Driver: &failedDriver{Memory: driver.NewMemory(10), readError: expected}}}
+	f.def.levels = []hub.Level{{Driver: &failedDriver{Memory: testdriver.NewMemory(10), readError: expected}}}
 	if _, err := f.cache.Get(context.Background(), 1); !errors.Is(err, expected) {
 		t.Fatal(err)
 	}
@@ -487,7 +488,7 @@ func (d *scalarDefinition) Build(context.Context, string) (any, error) {
 func TestPHPEmptySemantics(t *testing.T) {
 	for _, value := range []any{false, "", nil, 0, []any{}, map[string]any{}} {
 		t.Run(fmt.Sprintf("%T_%v", value, value), func(t *testing.T) {
-			d := &scalarDefinition{level: hub.Level{Driver: driver.NewMemory(10)}, value: value}
+			d := &scalarDefinition{level: hub.Level{Driver: testdriver.NewMemory(10)}, value: value}
 			c, e := hub.New[string, any](hub.NewHub(nil, "", nil), configured(d, hub.DefaultConfig("scalar")))
 			if e != nil {
 				t.Fatal(e)
@@ -512,7 +513,7 @@ func TestPHPEmptySemantics(t *testing.T) {
 }
 func TestValidation(t *testing.T) {
 	f := newFixture(t)
-	f.def.levels = []hub.Level{{Driver: f.local}, {Driver: driver.NewMemory(1)}}
+	f.def.levels = []hub.Level{{Driver: f.local}, {Driver: testdriver.NewMemory(1)}}
 	if _, err := f.cache.Get(context.Background(), 1); err == nil {
 		t.Fatal("重复驱动应该报错")
 	}

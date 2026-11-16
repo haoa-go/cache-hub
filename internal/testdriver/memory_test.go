@@ -1,8 +1,8 @@
-package driver_test
+package testdriver_test
 
 import (
 	"context"
-	"github.com/haoa-go/cache-hub/driver"
+	driver "github.com/haoa-go/cache-hub/internal/testdriver"
 	"testing"
 	"time"
 )
